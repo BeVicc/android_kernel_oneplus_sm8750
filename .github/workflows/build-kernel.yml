@@ -59,15 +59,12 @@ jobs:
             --branch "$BRANCH" \
             https://github.com/Ace6-Development/android_kernel_oneplus_sm8750 \
             kernel
-          echo "Kernel source cloned - branch: $BRANCH"
           cd kernel && git log --oneline -3
 
       - name: Integrate SukiSU Ultra + SUSfs
         working-directory: kernel
         run: |
-          echo "Patching SukiSU Ultra + SUSfs into kernel..."
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-          echo "Integration complete."
 
       - name: Find correct defconfig
         working-directory: kernel
@@ -99,9 +96,7 @@ jobs:
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export KBUILD_BUILD_USER=GHActions
           export KBUILD_BUILD_HOST=github
-
           make O=out ARCH=arm64 ${{ steps.defconfig.outputs.defconfig }}
-
           make -j$(nproc) O=out ARCH=arm64 \
             CC=clang \
             LLVM=1 \
@@ -109,7 +104,6 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             Image.lz4 dtbs 2>&1 | tee ../build.log
-
           ls -lh out/arch/arm64/boot/
 
       - name: Package with AnyKernel3
@@ -118,16 +112,13 @@ jobs:
           cp kernel/out/arch/arm64/boot/Image.lz4 anykernel3/
           mkdir -p anykernel3/dtbs
           find kernel/out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} anykernel3/dtbs/ \; 2>/dev/null || true
-
           cd anykernel3
           sed -i "s/device.name1=.*/device.name1=ktm/" anykernel.sh
           sed -i "s/do.devicecheck=1/do.devicecheck=0/" anykernel.sh
           sed -i "s|kernel.string=.*|kernel.string=Ace6-SUSfs-SukiSU by GHActions|" anykernel.sh
-
           DATE=$(date +%Y%m%d-%H%M)
           ZIP_NAME="Kernel-Ace6-ktm-SUSfs-${DATE}.zip"
           zip -r9 ../${ZIP_NAME} . -x "*.git*" -x "README.md"
-
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
           ls -lh ../${ZIP_NAME}
 
@@ -135,39 +126,43 @@ jobs:
         id: kver
         run: |
           VER=$(cat kernel/out/include/config/kernel.release 2>/dev/null || echo "unknown")
-          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "version=${VER}" >> $GITHUB_OUTPUT
+
+      - name: Set release info
+        id: info
+        run: |
+          echo "build_num=${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "kver=${{ steps.kver.outputs.version }}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: kernel-ace6-${{ github.run_number }}
+          tag_name: "kernel-ace6-${{ github.run_number }}"
           name: "Ace6 SUSfs Kernel - Build #${{ github.run_number }}"
           body: |
             ## OnePlus Ace 6 (ktm) SUSfs Kernel
-
             Built automatically by GitHub Actions.
-
-            **Kernel version:** ${{ steps.kver.outputs.version }}
-            **Source:** Ace6-Development/android_kernel_oneplus_sm8750
-            **Root:** SukiSU Ultra + SUSfs integrated
+            Kernel version: ${{ steps.kver.outputs.version }}
+            Source: Ace6-Development/android_kernel_oneplus_sm8750
+            Root: SukiSU Ultra + SUSfs integrated
 
             ### How to flash
             1. Boot into OrangeFox recovery
             2. Flash the zip
             3. Reboot to system
-            4. Verify: `adb shell uname -r` - look for `susfs` in output
+            4. Verify via adb: uname -r (look for susfs in output)
 
             ### After flashing
             - SukiSU Manager: install susfs4ksu module
             - Install Zygisk Next
             - Install PlayIntegrityFork
-            - Settings -> InfinityX Suite -> Spoofing -> disable all
+            - Settings > InfinityX Suite > Spoofing > disable all
             - Clear Google Wallet + Play Services data
-            - Tap to pay should work!
+            - Tap to pay ready!
           files: |
             ${{ env.ZIP_NAME }}
             build.log
           draft: false
           prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
