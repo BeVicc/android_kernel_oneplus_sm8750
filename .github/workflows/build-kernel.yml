@@ -63,22 +63,23 @@ jobs:
 
       - name: Clone kernel source
         run: |
+          rm -rf src
           BRANCH="${{ github.event.inputs.kernel_branch }}"
           BRANCH="${BRANCH:-lineage-23.2}"
           git clone --depth=1 \
             --branch "$BRANCH" \
             https://github.com/Ace6-Development/android_kernel_oneplus_sm8750 \
-            kernel
-          cd kernel && git log --oneline -3
+            src
+          cd src && git log --oneline -3
 
       - name: Integrate SukiSU Ultra + SUSfs
-        working-directory: kernel
+        working-directory: src
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
           echo "SukiSU + SUSfs integration done."
 
       - name: Find correct defconfig
-        working-directory: kernel
+        working-directory: src
         id: defconfig
         run: |
           echo "Available defconfigs:"
@@ -99,7 +100,7 @@ jobs:
           echo "defconfig=gki_defconfig" >> $GITHUB_OUTPUT
 
       - name: Build kernel
-        working-directory: kernel
+        working-directory: src
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
@@ -120,17 +121,18 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE=$GITHUB_WORKSPACE/gcc-arm64/bin/aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/gcc-arm32/bin/arm-linux-gnueabi- \
-            Image.lz4 dtbs 2>&1 | tee ../build.log
+            Image.lz4 dtbs 2>&1 | tee $GITHUB_WORKSPACE/build.log
 
           echo "--- Boot artifacts ---"
           ls -lh out/arch/arm64/boot/
 
       - name: Package with AnyKernel3
         run: |
+          rm -rf anykernel3
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 anykernel3
-          cp kernel/out/arch/arm64/boot/Image.lz4 anykernel3/
+          cp src/out/arch/arm64/boot/Image.lz4 anykernel3/
           mkdir -p anykernel3/dtbs
-          find kernel/out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} anykernel3/dtbs/ \; 2>/dev/null || true
+          find src/out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} anykernel3/dtbs/ \; 2>/dev/null || true
 
           cd anykernel3
           sed -i "s/device.name1=.*/device.name1=ktm/" anykernel.sh
@@ -139,14 +141,14 @@ jobs:
 
           DATE=$(date +%Y%m%d-%H%M)
           ZIP_NAME="Kernel-Ace6-ktm-SUSfs-${DATE}.zip"
-          zip -r9 ../${ZIP_NAME} . -x "*.git*" -x "README.md"
+          zip -r9 $GITHUB_WORKSPACE/${ZIP_NAME} . -x "*.git*" -x "README.md"
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-          ls -lh ../${ZIP_NAME}
+          ls -lh $GITHUB_WORKSPACE/${ZIP_NAME}
 
       - name: Get kernel version
         id: kver
         run: |
-          VER=$(cat kernel/out/include/config/kernel.release 2>/dev/null || echo "unknown")
+          VER=$(cat src/out/include/config/kernel.release 2>/dev/null || echo "unknown")
           echo "version=${VER}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
