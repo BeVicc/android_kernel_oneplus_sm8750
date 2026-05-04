@@ -1,0 +1,337 @@
+name: Build OnePlus Ace 6 SukiSU-Ultra + SUSFS Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: 'Branch of this repo to build from'
+        required: true
+        default: 'main'
+      defconfig:
+        description: 'Defconfig to use (e.g. gki_defconfig, oplus_defconfig)'
+        required: true
+        default: 'gki_defconfig'
+      kernel_arch:
+        description: 'Architecture'
+        required: true
+        default: 'arm64'
+      sukisu_branch:
+        description: 'SukiSU-Ultra branch (susfs-main = SUSFS pre-integrated, recommended)'
+        required: true
+        default: 'susfs-main'
+      enable_kpm:
+        description: 'Enable Kernel Patch Module (KPM) support'
+        required: true
+        default: 'true'
+      release:
+        description: 'Publish AnyKernel3 zip + boot.img as a GitHub Release'
+        required: true
+        default: 'true'
+
+env:
+  TZ: Europe/Amsterdam
+  KBUILD_BUILD_USER: bevicc
+  KBUILD_BUILD_HOST: github-actions
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      # ---------------------------------------------------------------
+      # 1. Prep runner
+      # ---------------------------------------------------------------
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af || true
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget ca-certificates build-essential bc bison flex \
+            libssl-dev libelf-dev libncurses5-dev zip unzip xz-utils zstd \
+            python3 python3-pip cpio rsync kmod ccache device-tree-compiler \
+            llvm lld clang
+          ccache -M 8G
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ github.workflow }}-${{ inputs.defconfig }}
+          max-size: 4G
+
+      # ---------------------------------------------------------------
+      # 2. Pull the kernel source from this fork
+      # ---------------------------------------------------------------
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.kernel_branch }}
+          path: kernel
+          fetch-depth: 1
+
+      # ---------------------------------------------------------------
+      # 3. Toolchain — AOSP clang for SM8750 (kernel 6.6 GKI 2.0)
+      # ---------------------------------------------------------------
+      - name: Fetch AOSP clang toolchain
+        run: |
+          mkdir -p toolchain/clang
+          # AOSP r510928 ships clang 19, which matches what current SM8750
+          # OnePlus trees expect. Update the URL/tag if your tree needs another.
+          CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r510928.tar.gz"
+          curl -L "$CLANG_URL" -o clang.tar.gz
+          tar -xzf clang.tar.gz -C toolchain/clang
+          rm clang.tar.gz
+          echo "$GITHUB_WORKSPACE/toolchain/clang/bin" >> $GITHUB_PATH
+          toolchain/clang/bin/clang --version || true
+
+      # ---------------------------------------------------------------
+      # 4. Integrate SukiSU-Ultra (SUSFS pre-integrated on susfs-main)
+      # ---------------------------------------------------------------
+      - name: Integrate SukiSU-Ultra
+        working-directory: kernel
+        run: |
+          set -euxo pipefail
+          # The susfs-main branch ships susfs already patched in.
+          # See https://sukisu.org/intro/ for the three branches.
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
+            | bash -s "${{ inputs.sukisu_branch }}"
+
+          # Record the SukiSU version for the build banner / release notes.
+          SUKISU_VERSION=$(cd KernelSU && git describe --tags --abbrev=0 2>/dev/null || echo "unknown")
+          echo "SUKISU_VERSION=$SUKISU_VERSION" >> $GITHUB_ENV
+
+      # ---------------------------------------------------------------
+      # 5. Make sure SUSFS, KSU and KPM are actually enabled in the
+      #    defconfig — the setup.sh wires up the source tree but does
+      #    NOT toggle Kconfig symbols.
+      # ---------------------------------------------------------------
+      - name: Patch defconfig
+        working-directory: kernel
+        run: |
+          set -euxo pipefail
+          # Find the defconfig file. SM8750 trees use either common/arch/...
+          # or arch/arm64/configs/ depending on layout.
+          DEFCONFIG="${{ inputs.defconfig }}"
+          for path in \
+            "common/arch/arm64/configs/$DEFCONFIG" \
+            "arch/arm64/configs/$DEFCONFIG"; do
+            if [ -f "$path" ]; then
+              DEFCONFIG_PATH="$path"
+              break
+            fi
+          done
+          if [ -z "${DEFCONFIG_PATH:-}" ]; then
+            echo "::error::Could not find $DEFCONFIG in expected locations"
+            exit 1
+          fi
+          echo "Using defconfig: $DEFCONFIG_PATH"
+
+          add_or_set() {
+            local key="$1" value="$2" file="$3"
+            sed -i "/^# *$key /d" "$file"
+            sed -i "/^$key=/d" "$file"
+            echo "$key=$value" >> "$file"
+          }
+
+          # KernelSU / SukiSU
+          add_or_set CONFIG_KSU                    y "$DEFCONFIG_PATH"
+          # SUSFS — the symbols are namespaced under KSU on susfs-main
+          add_or_set CONFIG_KSU_SUSFS              y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_SUS_PATH     y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_SUS_MOUNT    y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_SUS_KSTAT    y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_TRY_UMOUNT   y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_SPOOF_UNAME  y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_ENABLE_LOG   y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG y "$DEFCONFIG_PATH"
+          add_or_set CONFIG_KSU_SUSFS_OPEN_REDIRECT y "$DEFCONFIG_PATH"
+
+          # KPM (SukiSU-specific)
+          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+            add_or_set CONFIG_KPM y "$DEFCONFIG_PATH"
+          fi
+
+          # OnePlus kernels are heavily modified — disable LTO=full to keep
+          # build times sane on GHA runners. Comment this out if you want
+          # full LTO.
+          sed -i '/^CONFIG_LTO_CLANG_FULL=/d' "$DEFCONFIG_PATH"
+          add_or_set CONFIG_LTO_CLANG_THIN y "$DEFCONFIG_PATH"
+
+          echo "---- Final SUSFS/KSU lines in defconfig ----"
+          grep -E '^(CONFIG_KSU|CONFIG_KPM|CONFIG_LTO)' "$DEFCONFIG_PATH" || true
+
+      # ---------------------------------------------------------------
+      # 6. Build the kernel
+      # ---------------------------------------------------------------
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          set -euxo pipefail
+          export ARCH="${{ inputs.kernel_arch }}"
+          export SUBARCH="$ARCH"
+          export PATH="/usr/lib/ccache:$PATH"
+
+          MAKE_ARGS=(
+            ARCH="$ARCH"
+            O=out
+            LLVM=1 LLVM_IAS=1
+            CC="ccache clang"
+            HOSTCC="ccache clang"
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          )
+
+          # Some SM8750 trees use a build wrapper (build.sh / oplus/build/...);
+          # fall back to a plain make if not present.
+          if [ -x "./build.sh" ]; then
+            ./build.sh "${{ inputs.defconfig }}"
+          elif [ -d "common" ]; then
+            # GKI-style layout: common/ is the kernel, build with kleaf or make.
+            make -C common "${MAKE_ARGS[@]}" "${{ inputs.defconfig }}"
+            make -C common "${MAKE_ARGS[@]}" -j"$(nproc)"
+          else
+            make "${MAKE_ARGS[@]}" "${{ inputs.defconfig }}"
+            make "${MAKE_ARGS[@]}" -j"$(nproc)"
+          fi
+
+      - name: Locate kernel image
+        working-directory: kernel
+        run: |
+          set -euxo pipefail
+          # The Image lands somewhere under out/ — find it.
+          IMAGE=$(find . -type f \( -name 'Image' -o -name 'Image.gz' -o -name 'Image.gz-dtb' \) \
+                  -path '*/out/*' | head -n1)
+          if [ -z "$IMAGE" ]; then
+            echo "::error::No kernel Image produced — check the build log above"
+            exit 1
+          fi
+          echo "Found image: $IMAGE"
+          echo "KERNEL_IMAGE=$GITHUB_WORKSPACE/kernel/$IMAGE" >> $GITHUB_ENV
+
+      # ---------------------------------------------------------------
+      # 7. Package — AnyKernel3 zip + boot.img
+      # ---------------------------------------------------------------
+      - name: Clone AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
+          # Sane defaults for OnePlus SM8750 / "sun" devices. Adjust block
+          # paths and device names here if you flash on a sibling device.
+          cat > ak3/anykernel.sh <<'EOF'
+          ### AnyKernel3 settings
+          properties() { '
+          kernel.string=OnePlus Ace 6 SukiSU-Ultra + SUSFS
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=OP_Ace6
+          device.name2=ace6
+          device.name3=sun
+          device.name4=oneplus_ace6
+          supported.versions=14-16
+          supported.patchlevels=
+          '; }
+          block=boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+
+          . tools/ak3-core.sh;
+          split_boot;
+          flash_boot;
+          EOF
+
+      - name: Build AnyKernel3 zip
+        run: |
+          set -euxo pipefail
+          cp "$KERNEL_IMAGE" ak3/Image
+          cd ak3
+          rm -rf .git
+          ZIP_NAME="AK3-OP_Ace6-SukiSU-${SUKISU_VERSION}-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "../$ZIP_NAME" . -x '*.git*' '*.md' 'README*'
+          echo "AK3_ZIP=$GITHUB_WORKSPACE/$ZIP_NAME" >> $GITHUB_ENV
+
+      - name: Build boot.img
+        run: |
+          set -euxo pipefail
+          # magiskboot is the simplest way to repack a stock boot.img with
+          # a new kernel. We pull the prebuilt binary from Magisk releases.
+          mkdir -p boot && cd boot
+          curl -L https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-v27.0.apk \
+               -o magisk.apk || \
+            curl -L https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk \
+                 -o magisk.apk
+          unzip -j magisk.apk 'lib/x86_64/libmagiskboot.so' -d .
+          mv libmagiskboot.so magiskboot
+          chmod +x magiskboot
+
+          # If the user committed a stock boot.img to .ci/stock_boot.img we
+          # repack it; otherwise we just publish the AnyKernel3 zip and the
+          # raw Image.
+          STOCK="$GITHUB_WORKSPACE/kernel/.ci/stock_boot.img"
+          if [ -f "$STOCK" ]; then
+            cp "$STOCK" stock.img
+            ./magiskboot unpack stock.img
+            cp "$KERNEL_IMAGE" kernel
+            ./magiskboot repack stock.img new-boot.img
+            cp new-boot.img "$GITHUB_WORKSPACE/boot.img"
+            echo "BOOT_IMG=$GITHUB_WORKSPACE/boot.img" >> $GITHUB_ENV
+          else
+            echo "::warning::No .ci/stock_boot.img committed — skipping boot.img repack."
+            echo "::warning::Drop a stock boot.img at .ci/stock_boot.img in this repo to enable it."
+          fi
+
+      # ---------------------------------------------------------------
+      # 8. Upload artifacts + optional release
+      # ---------------------------------------------------------------
+      - name: Upload AnyKernel3 zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-zip
+          path: ${{ env.AK3_ZIP }}
+
+      - name: Upload boot.img
+        if: env.BOOT_IMG != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-img
+          path: ${{ env.BOOT_IMG }}
+
+      - name: Upload raw kernel Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image
+          path: ${{ env.KERNEL_IMAGE }}
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: SukiSU-Ultra ${{ env.SUKISU_VERSION }} — Build ${{ github.run_number }}
+          body: |
+            **OnePlus Ace 6 (sm8750) — SukiSU-Ultra + SUSFS kernel**
+
+            - Source: `${{ github.repository }}@${{ inputs.kernel_branch }}`
+            - SukiSU branch: `${{ inputs.sukisu_branch }}` (`${{ env.SUKISU_VERSION }}`)
+            - Defconfig: `${{ inputs.defconfig }}`
+            - KPM: `${{ inputs.enable_kpm }}`
+
+            Flash the AnyKernel3 zip via Kernel Flasher / SukiSU Manager,
+            or fastboot-flash the boot.img to the active boot slot.
+          files: |
+            ${{ env.AK3_ZIP }}
+            ${{ env.BOOT_IMG }}
+            ${{ env.KERNEL_IMAGE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
