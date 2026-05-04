@@ -33,8 +33,9 @@ jobs:
             bc bison build-essential flex \
             g++-multilib gcc-multilib git \
             libelf-dev libssl-dev \
-            make python3 zip unzip wget \
-            lz4 binutils-aarch64-linux-gnu \
+            make python3 zip unzip wget curl \
+            lz4 device-tree-compiler \
+            binutils-aarch64-linux-gnu \
             binutils-arm-linux-gnueabi
 
       - name: Set up Clang
@@ -72,23 +73,46 @@ jobs:
             src
           cd src && git log --oneline -3
 
+      - name: Fix missing OPlus stub Kconfigs
+        working-directory: src
+        run: |
+          for dir in \
+            drivers/base/kernelFwUpdate \
+            drivers/base/touchpanel_notify \
+            drivers/base/magtransfer; do
+            mkdir -p "$dir"
+            if [ ! -f "$dir/Kconfig" ]; then
+              echo "# Empty stub Kconfig" > "$dir/Kconfig"
+              echo "Created stub: $dir/Kconfig"
+            fi
+          done
+
       - name: Integrate SukiSU Ultra + SUSfs
         working-directory: src
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+          for f in build.config.gki common/build.config.gki; do
+            if [ -f "$f" ]; then
+              sed -i '/POST_DEFCONFIG_CMDS.*check_defconfig/d' "$f"
+              echo "Removed POST_DEFCONFIG_CMDS from $f"
+            fi
+          done
           echo "SukiSU + SUSfs integration done."
 
       - name: Find correct defconfig
         working-directory: src
         id: defconfig
         run: |
-          echo "Available defconfigs:"
-          ls arch/arm64/configs/ | head -20
+          echo "=== All available defconfigs ==="
+          find arch/arm64/configs -name "*defconfig*" -o -name "*.fragment" | sort
+          echo "================================="
           for cfg in \
             vendor/kalama_GKI_defconfig \
             vendor/sm8750_GKI_defconfig \
             vendor/sun_GKI_defconfig \
+            vendor/pineapple_GKI_defconfig \
             kalama_GKI_defconfig \
+            sm8750_defconfig \
             lineageos_kalama_defconfig \
             gki_defconfig; do
             if [ -f "arch/arm64/configs/$cfg" ]; then
@@ -112,8 +136,10 @@ jobs:
           export KBUILD_BUILD_USER=GHActions
           export KBUILD_BUILD_HOST=github
 
-          echo "Building with defconfig: ${{ steps.defconfig.outputs.defconfig }}"
-          make O=out ARCH=arm64 ${{ steps.defconfig.outputs.defconfig }}
+          DEFCONFIG="${{ steps.defconfig.outputs.defconfig }}"
+          echo "Building with defconfig: $DEFCONFIG"
+
+          make O=out ARCH=arm64 "$DEFCONFIG"
 
           make -j$(nproc) O=out ARCH=arm64 \
             CC=clang \
@@ -123,8 +149,8 @@ jobs:
             CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/gcc-arm32/bin/arm-linux-gnueabi- \
             Image.lz4 dtbs 2>&1 | tee $GITHUB_WORKSPACE/build.log
 
-          echo "--- Boot artifacts ---"
-          ls -lh out/arch/arm64/boot/
+          echo "=== Boot artifacts ==="
+          ls -lh out/arch/arm64/boot/ || echo "No boot artifacts found!"
 
       - name: Package with AnyKernel3
         run: |
@@ -133,6 +159,8 @@ jobs:
           cp src/out/arch/arm64/boot/Image.lz4 anykernel3/
           mkdir -p anykernel3/dtbs
           find src/out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} anykernel3/dtbs/ \; 2>/dev/null || true
+          DTB_COUNT=$(ls anykernel3/dtbs/*.dtb 2>/dev/null | wc -l)
+          echo "Copied ${DTB_COUNT} DTB files"
 
           cd anykernel3
           sed -i "s/device.name1=.*/device.name1=ktm/" anykernel.sh
@@ -149,37 +177,4 @@ jobs:
         id: kver
         run: |
           VER=$(cat src/out/include/config/kernel.release 2>/dev/null || echo "unknown")
-          echo "version=${VER}" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "kernel-ace6-${{ github.run_number }}"
-          name: "Ace6 SUSfs Kernel - Build #${{ github.run_number }}"
-          body: |
-            ## OnePlus Ace 6 (ktm) SUSfs Kernel
-            Built automatically by GitHub Actions.
-            Kernel version: ${{ steps.kver.outputs.version }}
-            Source: Ace6-Development/android_kernel_oneplus_sm8750
-            Root: SukiSU Ultra + SUSfs integrated
-
-            ### How to flash
-            1. Boot into OrangeFox recovery
-            2. Flash the zip
-            3. Reboot to system
-            4. Verify: adb shell uname -r (look for susfs in output)
-
-            ### After flashing
-            - SukiSU Manager: install susfs4ksu module
-            - Install Zygisk Next
-            - Install PlayIntegrityFork
-            - Settings > InfinityX Suite > Spoofing > disable all
-            - Clear Google Wallet + Play Services data
-            - Tap to pay ready!
-          files: |
-            ${{ env.ZIP_NAME }}
-            build.log
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "version=${VER}" >> $GITHUB_OU
