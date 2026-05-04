@@ -7,9 +7,6 @@ on:
         description: "Kernel source branch"
         required: true
         default: "lineage-23.2"
-  push:
-    branches:
-      - main
 
 permissions:
   contents: write
@@ -37,32 +34,32 @@ jobs:
             g++-multilib gcc-multilib git \
             libelf-dev libssl-dev \
             make python3 zip unzip wget \
-            lz4 binutils-aarch64-linux-gnu
+            lz4 binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi
 
-      - name: Download GCC cross-compilers
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/gcc-arm64
-          mkdir -p $GITHUB_WORKSPACE/gcc-arm32
-          wget -q \
-            https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/aarch64-linux-gnu/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz \
-            -O gcc64.tar.xz
-          wget -q \
-            https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabi/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabi.tar.xz \
-            -O gcc32.tar.xz
-          tar -xf gcc64.tar.xz -C $GITHUB_WORKSPACE/gcc-arm64 --strip-components=1
-          tar -xf gcc32.tar.xz -C $GITHUB_WORKSPACE/gcc-arm32 --strip-components=1
-          echo "$GITHUB_WORKSPACE/gcc-arm64/bin" >> $GITHUB_PATH
-          echo "$GITHUB_WORKSPACE/gcc-arm32/bin" >> $GITHUB_PATH
-
-      - name: Set up Clang 21
+      - name: Set up Clang
         run: |
           mkdir -p $GITHUB_WORKSPACE/clang
-          wget -q \
-            https://github.com/ZyCromerZ/Clang/releases/download/21.0.0-20250101-release/Clang-21.0.0-20250101.tar.gz \
+          wget --retry-connrefused --waitretry=5 --tries=3 -q \
+            "https://github.com/ZyCromerZ/Clang/releases/download/23.0.0git-20260130-release/ZyC-Clang-23.0.0git-20260130.tar.gz" \
             -O clang.tar.gz
           tar -xzf clang.tar.gz -C $GITHUB_WORKSPACE/clang
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
           clang --version
+
+      - name: Download Linaro GCC cross-compilers
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/gcc-arm64
+          mkdir -p $GITHUB_WORKSPACE/gcc-arm32
+          wget --retry-connrefused --waitretry=5 --tries=3 -q \
+            "https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/aarch64-linux-gnu/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz" \
+            -O gcc64.tar.xz
+          wget --retry-connrefused --waitretry=5 --tries=3 -q \
+            "https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabi/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabi.tar.xz" \
+            -O gcc32.tar.xz
+          tar -xf gcc64.tar.xz -C $GITHUB_WORKSPACE/gcc-arm64 --strip-components=1
+          tar -xf gcc32.tar.xz -C $GITHUB_WORKSPACE/gcc-arm32 --strip-components=1
+          $GITHUB_WORKSPACE/gcc-arm64/bin/aarch64-linux-gnu-gcc --version
 
       - name: Clone kernel source
         run: |
@@ -78,19 +75,23 @@ jobs:
         working-directory: kernel
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+          echo "SukiSU + SUSfs integration done."
 
       - name: Find correct defconfig
         working-directory: kernel
         id: defconfig
         run: |
+          echo "Available defconfigs:"
+          ls arch/arm64/configs/ | head -20
           for cfg in \
             vendor/kalama_GKI_defconfig \
             vendor/sm8750_GKI_defconfig \
             vendor/sun_GKI_defconfig \
             kalama_GKI_defconfig \
+            lineageos_kalama_defconfig \
             gki_defconfig; do
             if [ -f "arch/arm64/configs/$cfg" ]; then
-              echo "Found defconfig: $cfg"
+              echo "Using defconfig: $cfg"
               echo "defconfig=$cfg" >> $GITHUB_OUTPUT
               exit 0
             fi
@@ -110,6 +111,7 @@ jobs:
           export KBUILD_BUILD_USER=GHActions
           export KBUILD_BUILD_HOST=github
 
+          echo "Building with defconfig: ${{ steps.defconfig.outputs.defconfig }}"
           make O=out ARCH=arm64 ${{ steps.defconfig.outputs.defconfig }}
 
           make -j$(nproc) O=out ARCH=arm64 \
@@ -120,6 +122,7 @@ jobs:
             CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/gcc-arm32/bin/arm-linux-gnueabi- \
             Image.lz4 dtbs 2>&1 | tee ../build.log
 
+          echo "--- Boot artifacts ---"
           ls -lh out/arch/arm64/boot/
 
       - name: Package with AnyKernel3
