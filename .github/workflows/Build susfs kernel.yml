@@ -128,17 +128,18 @@ jobs:
           # setup.sh does a default-branch clone + git checkout, which
           # silently falls back if the branch is missing.
           rm -rf KernelSU
-          git clone --no-checkout https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
-
+          git clone --depth=1 --branch main \
+            https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
           cd KernelSU
-          if git ls-remote --exit-code origin "refs/heads/$REQUESTED_BRANCH" >/dev/null 2>&1; then
-            git fetch origin "$REQUESTED_BRANCH":"$REQUESTED_BRANCH"
-            git checkout "$REQUESTED_BRANCH"
+
+          if [ "$REQUESTED_BRANCH" = "main" ]; then
+            CHECKED_OUT="main"
+          elif git ls-remote --exit-code origin "refs/heads/$REQUESTED_BRANCH" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$REQUESTED_BRANCH"
+            git checkout -B "$REQUESTED_BRANCH" "origin/$REQUESTED_BRANCH"
             CHECKED_OUT="$REQUESTED_BRANCH"
           else
-            echo "::warning::SukiSU branch '$REQUESTED_BRANCH' does not exist; falling back to 'main' (which includes SUSFS in v4.x)."
-            git fetch origin main:main
-            git checkout main
+            echo "::warning::SukiSU branch '$REQUESTED_BRANCH' does not exist; staying on 'main' (which includes SUSFS in v4.x)."
             CHECKED_OUT="main"
           fi
           cd ..
