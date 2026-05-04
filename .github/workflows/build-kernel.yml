@@ -66,7 +66,7 @@ jobs:
           rm -rf src
           BRANCH="${{ github.event.inputs.kernel_branch }}"
           BRANCH="${BRANCH:-lineage-23.2}"
-          git clone --depth=1 \
+          git clone --depth=1 --recurse-submodules --shallow-submodules \
             --branch "$BRANCH" \
             https://github.com/Ace6-Development/android_kernel_oneplus_sm8750 \
             src
